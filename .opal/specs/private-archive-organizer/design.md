@@ -296,11 +296,16 @@ struct SemanticRequest: Sendable {
     @Guide(description: "Issuing organisation or subject, short") var issuer: String
     @Guide(description: "Primary document date, ISO 8601, empty if absent") var documentDate: String
 }
-@available(macOS 27.0, *)
 actor ModelRouter {
     func respond<T: Generable>(
         to request: SemanticRequest,
         policy: ProcessingPolicy,
+        generating: T.Type
+    ) async throws -> (T, ModelExecutionRecord)
+
+    @available(macOS 27.0, *)
+    private func respondWithPCC<T: Generable>(
+        to request: SemanticRequest,
         generating: T.Type
     ) async throws -> (T, ModelExecutionRecord)
 }
