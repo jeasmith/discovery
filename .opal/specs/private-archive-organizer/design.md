@@ -2,50 +2,51 @@
 
 ## Overview
 
-Discovery (product name: Private Archive Organizer) is a sandboxed SwiftUI macOS app targeting macOS 26 (Apple silicon). It implements a staged, resumable document pipeline: **inventory → duplicate detection → extraction → classification → naming → proposal → approved execution**, with a Review Queue absorbing every ambiguous case and an append-first Operation Journal making every filesystem change verifiable and reversible.
+Discovery (product name: Private Archive Organizer) is a sandboxed SwiftUI macOS app with a macOS 26.5 local-only baseline and a macOS 27 enhanced path for multimodal Foundation Models and Apple's Private Cloud Compute. It implements a staged, resumable document pipeline: **inventory → duplicate detection → local extraction/visual evidence → model routing → classification → naming → proposal → approved execution**, with a Review Queue absorbing every ambiguous case and an append-first Operation Journal making every filesystem change verifiable and reversible.
 
-The architecture enforces the spec's central invariant structurally: the two probabilistic components (Classification Service, Summarisation Service) can only *write recommendations into the local store*. Only the deterministic Operation Executor touches archive files, and it accepts only validated, user-approved `ProposedAction` values. Privacy is enforced at the OS layer — the app ships with App Sandbox enabled and **no network entitlement**, so no code path (present or future) can transmit anything.
+The architecture enforces the spec's central invariant structurally: the probabilistic components can only write recommendations, summaries, and non-content provenance into the local store. Only the deterministic Operation Executor touches archive files, and it accepts only validated, user-approved `ProposedAction` values. Local filesystem work never leaves the Mac. Semantic requests default to `SystemLanguageModel`; `PrivateCloudComputeLanguageModel` is available only when the user has enabled the Apple Private Cloud Allowed policy and the app has the required platform capability and entitlement. No Claude, OpenAI, Gemini, extension-model, analytics, or arbitrary provider path exists.
 
-All model work uses the Apple Foundation Models framework (`SystemLanguageModel.default`) with guided generation (`@Generable`), which is on-device only. When the model is unavailable the pipeline runs in Degraded Mode: deterministic stages continue; classification/summarisation park as "pending".
+The model layer uses guided generation (`@Generable`) through a Model Router. macOS 26 remains useful for text-first local processing. macOS 27 adds multimodal on-device prompts and the eligible PCC server model, whose larger context and reasoning can be used autonomously within the user's persisted policy. When no Approved Apple Model is permitted and available, deterministic stages continue and semantic work parks as pending.
 
-> **Note for implementing agents:** Foundation Models and new Vision API names below reflect the macOS 26 SDK as designed. Verify exact signatures against the installed SDK docs (`LanguageModelSession`, `@Generable`, `@Guide`, `SystemLanguageModel.availability`, `RecognizeTextRequest`) before use; do not invent fallback APIs if a name differs — check documentation.
+> **Note for implementing agents:** macOS 27, Xcode 27, multimodal Foundation Models, and developer PCC access are currently beta-era APIs. Verify exact signatures, availability annotations, entitlement names, sandbox behaviour, and quota APIs against the installed SDK and the current Apple documentation before implementation. Adapt API names when required; do not weaken the Processing Policy or substitute a third-party model.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Implement the full Requirements 1–15 pipeline in one native app, entirely on-device.
-- Make the privacy boundary structural (sandbox, no network entitlement, app-container-only metadata) rather than conventional (Req 1, 11).
+- Implement the full Requirements 1–16 pipeline in one native app with local extraction and Apple-only semantic processing.
+- Default to on-device processing while supporting explicitly enabled, policy-gated PCC on eligible macOS 27 systems (Req 5, 11, 16).
+- Make local privacy boundaries structural through sandboxing, selected-folder access, app-container-only metadata, and absence of arbitrary provider networking (Req 1, 11).
 - Make every archive mutation approved, hash-verified, journaled, and rollback-capable (Req 7, 8, 10).
-- Keep probabilistic output (category, confidence, summary) strictly advisory via type separation (Req 5).
-- Remain fully functional for deterministic work in Degraded Mode (Req 12).
-- Ship a test suite that runs on CI (existing `ci.yml`: `Discovery.xcodeproj`, scheme `Discovery`, `DiscoveryTests`, `DiscoveryUITests`) against synthetic fixtures only (Req 14).
+- Handle text-free and image-only files honestly: multimodal reasoning when available, otherwise human review (Req 4, 5, 13).
+- Keep probabilistic output strictly advisory and record which Apple execution tier produced it (Req 5, 16).
+- Ship CI-safe tests against synthetic fixtures only, with live model/PCC tests separately gated (Req 14).
 
 **Non-Goals:**
 - Multiple Archive Roots — v1 supports exactly one user-selected root (Req 1.2), so all moves are same-volume renames; multi-root support and cross-volume move handling are a follow-up spec.
 - Taxonomy editing UI (Req 15 fixes the taxonomy; config format is forward-compatible).
-- Handwriting recognition quality guarantees, non-Latin language tuning.
-- Any cloud path, Private Cloud Compute, or third-party model integration.
+- Handwriting recognition quality guarantees, non-Latin language tuning, or guaranteed interpretation of arbitrary photographs.
+- Claude, OpenAI, Gemini, extension models, generic cloud APIs, analytics, or remote summary storage.
 - Background daemon / Spotlight importer / menu-bar agent — this is a foreground document app.
 - Windows/Linux/iOS targets.
 - Permanent deletion, even user-triggered — quarantine only.
 
 ## Decisions
 
-### Decision 1: Platform baseline — macOS 26, Apple silicon, Swift 6, SwiftUI
+### Decision 1: macOS 26.5 baseline with a macOS 27 enhanced tier
 
-**Outcome**: Target macOS 26+, Apple silicon only, Swift 6 strict concurrency, SwiftUI app lifecycle. The repo already contains a committed template `Discovery.xcodeproj` (Swift 5.0 language mode, `MACOSX_DEPLOYMENT_TARGET = 26.5`, sandbox on, no entitlements file, no shared scheme): implementation **updates** that project in place — Swift 6 language mode, keep the 26.5 deployment target, add the entitlements file, and check in a shared `Discovery` scheme under `xcshareddata/xcschemes/` (required for `xcodebuild -scheme` on a fresh CI checkout).
+**Outcome**: Keep the existing macOS 26.5 deployment target and Apple-silicon requirement, use Swift 6 strict concurrency and SwiftUI, and conditionally enable macOS 27 multimodal and PCC APIs behind `@available(macOS 27.0, *)` capability checks. The committed template project is updated in place and receives a shared `Discovery` scheme.
 
-**Reasoning**: The Foundation Models framework (Req 5, 9, 11) requires macOS 26 with Apple Intelligence on Apple silicon, so a lower deployment target only adds dead code paths. Swift 6 concurrency lets the pipeline be actor-isolated, which is how we guarantee single-writer semantics for the journal. CI is already committed expecting `Discovery.xcodeproj` and scheme `Discovery`, and preflight confirmed the template project's defaults conflict with these settings, so reconciling it is an explicit first task rather than an implicit assumption.
+**Reasoning**: macOS 26 provides the stable text-first Foundation Models baseline and local Vision OCR, so the app can deliver the deterministic and on-device portions without depending on beta-only capabilities. macOS 27 materially improves this use case through image prompts, Vision tools callable by the model, an 8K on-device context on newer devices, and the 32K PCC model with reasoning. A dual tier prevents the beta feature set from silently becoming the minimum viable product while preserving a direct upgrade path.
 
-**Alternative Options**: AppKit (rejected: no benefit for this UI, more code); supporting Intel via Degraded-Mode-only builds (rejected: doubles the QA matrix for a personal-use v1).
+**Alternative Options**: Raise the minimum to macOS 27 (simpler implementation but beta-only and excludes the stable baseline); freeze all cloud and multimodal work until macOS 27 ships (lower short-term risk but fails the approved PCC requirement).
 
-### Decision 2: Privacy enforced by entitlements — no network entitlement at all
+### Decision 2: Sandbox plus an Apple-only PCC capability boundary
 
-**Outcome**: The app ships sandboxed (`com.apple.security.app-sandbox = true`, `com.apple.security.files.user-selected.read-write = true`, `com.apple.security.files.bookmarks.app-scope = true`) and deliberately omits `com.apple.security.network.client` and `.server`.
+**Outcome**: Ship with App Sandbox, user-selected read/write folders, and app-scoped bookmarks. The Local Only build/policy contains no arbitrary network client path. PCC support is compiled only for macOS 27+, exposed only when the Apple PCC capability entitlement is present and `PrivateCloudComputeLanguageModel` is available, and invoked exclusively through Foundation Models. Do not add a third-party networking SDK or provider key. Verify with the Xcode 27 SDK whether PCC's system service requires any generic sandbox network entitlement; if it does, document and narrowly test that requirement before changing entitlements.
 
-**Reasoning**: Req 11.2/11.4 demand that content never leaves the device and that no silent fallback exists. Omitting the network entitlement makes the OS reject any socket the process ever opens, converting a policy requirement into a mechanically enforced property that a unit test can assert by parsing the `.entitlements` file (Property 10). Foundation Models' system model is on-device, so no entitlement is needed for it.
+**Reasoning**: The original no-network entitlement was a strong local guarantee but would make the newly approved cloud mode impossible if the SDK requires an outbound capability. The replacement boundary is still mechanically narrow: selected folders and app-container persistence for local data, a single Apple framework entry point for optional cloud inference, and Processing Policy checks before every request. This reflects PCC's technical security model without pretending a networked mode has zero residual risk.
 
-**Alternative Options**: Runtime network-monitor assertions (weaker — only detects, doesn't prevent); NEFilterProvider content filter (massively over-scoped, needs system extension approval).
+**Alternative Options**: Maintain separate Local Only and PCC app targets (stronger binary separation but doubles signing and QA); add a generic HTTP client for Apple or other providers (rejected because it broadens the attack surface and bypasses PCC's OS-integrated guarantees).
 
 ### Decision 3: Persistence with SwiftData in the app container
 
@@ -63,23 +64,21 @@ All model work uses the Apple Foundation Models framework (`SystemLanguageModel.
 
 **Alternative Options**: FSEvents-based after-the-fact auditing (observational, cannot drive rollback); APFS snapshots (require elevated privileges, violate least-privilege).
 
-### Decision 5: Foundation Models guided generation with self-reported confidence
+### Decision 5: Guided generation behind a deterministic Model Router
 
-**Outcome**: Classification and summarisation use `LanguageModelSession.respond(to:generating:)` with `@Generable` output types. The category field is a `@Generable` enum constrained to the Category Taxonomy + `unknown`; confidence is a `@Guide(.range(0...1))` double reported by the model. Default review threshold: **0.7**, user-configurable (Req 5.4).
+**Outcome**: Classification and summarisation use `LanguageModelSession.respond(to:generating:)` with `@Generable` output types. A `ProcessingPolicy` defaults to `.localOnly`; when the user enables `.applePrivateCloudAllowed`, a Model Router may choose `PrivateCloudComputeLanguageModel` for requests that exceed the local context budget, require supported multimodal reasoning, fail locally for a retryable capability reason, or are explicitly retried with PCC. The category remains constrained to the fixed taxonomy + `unknown`; default review threshold is 0.7. Every result stores a non-content `ModelExecutionRecord`.
 
-**Reasoning**: Guided generation constrains output to the schema, eliminating parse failures and guaranteeing Req 5.1's "exactly one category from the taxonomy or Unknown" at the type level. The framework exposes no token log-probabilities, so self-reported confidence is the only per-call signal available; the Review Queue and threshold exist precisely to absorb its unreliability.
+**Reasoning**: Guided generation preserves the schema and advisory boundary regardless of execution tier. A persistent one-time policy gives the requested autonomy without per-document consent fatigue, while deterministic routing and visible provenance prevent silent cloud use. The on-device model remains the lowest-risk default; PCC is used only for capability-driven cases within the user's explicit Apple-only consent.
 
-**Alternative Options**: N-sample majority voting for a frequency-based confidence (3–5× latency per document across a large archive; can be a later spec); embedding-similarity classification via NLEmbedding (weaker semantics for niche document types, but a candidate future cross-check).
+**Alternative Options**: Always use PCC when enabled (unnecessary disclosure and quota use); prompt before every PCC call (stronger per-request consent but undermines autonomous archive processing); route to external providers when quota is exhausted (rejected by Req 5.8 and 11.4).
 
-### Decision 6: Extraction stack — PDFKit, Vision OCR, NSAttributedString, ZIPFoundation
+### Decision 6: Local extraction first; multimodal understanding is separate
 
-**Outcome**: Text-layer PDFs via `PDFDocument` string extraction; scanned PDFs rendered per-page at 300 DPI then OCR'd with Vision (`RecognizeTextRequest`, accurate mode); images OCR'd directly; DOCX via `NSAttributedString(url:options:)` with `.officeOpenXML`; RTF/TXT/CSV via AppKit/Foundation; XLSX via **ZIPFoundation** (the only third-party dependency, pinned by exact version) + `XMLParser` over `sharedStrings.xml` and sheet XML.
+**Outcome**: Text-layer PDFs use PDFKit per page; sparse/image pages render at 300 DPI and run through Vision OCR. Images also run through applicable local barcode recognition and optional generic Vision classification to produce `VisualEvidence`. Office formats use local parsers. Vision OCR and classification are treated as task-specific extraction signals, not general semantic comprehension. On macOS 27+, the Model Router can pass bounded page images alongside text to the on-device multimodal model or, under the Apple Private Cloud Allowed policy, to PCC. Text-free images on macOS 26 or without a permitted multimodal model go to the Review Queue.
 
-Text-layer detection is **per page**, not per document: a PDF page "has a text layer" iff PDFKit extraction of that page alone is not an Insufficient Extraction (< 25 non-whitespace chars). Pages with a text layer use it directly; pages without are rendered at 300 DPI and OCR'd; results merge in page order. This handles hybrid PDFs (a letter with real text pages plus a scanned attachment page) without silently dropping the scanned pages' content — the failure mode a whole-document heuristic has.
+**Reasoning**: OCR answers “what text is visible,” while barcode and image classification answer narrow detector questions; neither reliably explains an arbitrary document layout or photograph. Separating local extraction from semantic visual reasoning prevents false confidence and directly handles image-only documents. Per-page processing also preserves hybrid PDFs without dropping scanned attachments.
 
-**Reasoning**: Everything is local (Req 4.4) and Apple-provided except XLSX, which has no system parser; ZIPFoundation is a small, MIT-licensed, pure-Swift zip reader — acceptable dependency cost for a required format (Req 2.2 Glossary). Per-page detection satisfies Req 4.1/4.2 precedence for every page individually, which is the only reading under which a hybrid document's content is fully extracted.
-
-**Alternative Options**: Writing a minimal zip central-directory reader in-repo (~300 lines, no dependency — acceptable fallback if the dependency is unwanted); dropping XLSX (violates the pinned Supported Office Document list).
+**Alternative Options**: Treat any Vision label as a document classification (too coarse and unsafe); send every page image to PCC (unnecessary exposure and quota consumption); reject all text-free files (safe but wastes macOS 27's multimodal capability).
 
 ### Decision 7: Deterministic near-duplicate detection — text shingles + perceptual hash
 
@@ -97,13 +96,13 @@ Text-layer detection is **per page**, not per document: a PDF page "has a text l
 
 **Alternative Options**: `<Category>/<Year>/` deep hierarchies (harder to flatten/rollback; category folders already partition), spaces in names (breaks scripts users may run over the archive).
 
-### Decision 9: Model-call input budgeting
+### Decision 9: Evidence selection and model-call budgets
 
-**Outcome**: Classification prompt receives the first **2,000 characters** of whitespace-normalized Extracted Text. Summarisation receives the first **3,000 characters**; the returned summary is deterministically truncated at a sentence boundary to ≤ **500 characters** before storage (Req 9.1's cap is enforced by code, not by trusting the model).
+**Outcome**: Build a bounded `SemanticRequest` from high-value evidence: document head, issuer/date candidates, selected OCR passages, and at most the page images required to resolve ambiguity. Read `contextSize` from the chosen model rather than hard-coding one universal cap. Reserve prompt/output headroom and target no more than 75% of the reported context. Expected current capacities are 4,096 tokens for the macOS 26 on-device model, 8,192 on macOS 27 on newer devices, and 32,768 for PCC. Stored summaries remain deterministically capped at 500 characters.
 
-**Reasoning**: The on-device model's context window is small (≈4k tokens); document heads carry letterheads, dates, issuers, and subjects — the identifying content. Deterministic truncation keeps a probabilistic component from violating a SHALL.
+**Reasoning**: Static 2,000/3,000 character caps underuse PCC and do not account for images or changing model capacities. Dynamic budgeting makes routing explainable: use on-device when the request fits; use PCC only when policy permits and added capacity or reasoning is required. Evidence minimisation also reduces both privacy exposure and hallucination surface.
 
-**Alternative Options**: Chunked map-reduce summarisation (better for long documents; deferred — summaries are identification aids, not abstracts).
+**Alternative Options**: Send full documents (wastes context and discloses unnecessary material); chunk every document through PCC (higher disclosure and quota use); retain fixed character caps (simple but poorly matched to multiple models).
 
 ### Decision 10: Single Archive Root in v1
 
@@ -113,51 +112,52 @@ Text-layer detection is **per page**, not per document: a PDF page "has a text l
 
 **Alternative Options**: Per-root category folders (files never leave their volume, but categories split across roots); consolidation under a primary root with a journaled copy+verify+delete `EXDEV` fallback (more machinery for a v1 nobody asked for). Either can be a follow-up spec without changing the executor's contract.
 
+### Decision 11: PCC is approved with documented residual risk
+
+**Outcome**: Treat PCC as an Approved Apple Model tier, not as an ordinary third-party provider and not as equivalent to local processing. The product disclosure records Apple's published guarantees — stateless computation, encryption to attested nodes, no privileged runtime access, anti-targeting, and public release transparency — alongside residual risks: implementation vulnerabilities, compromised endpoints or client code, account/region/quota dependencies, legal compulsion at the platform boundary, and the fact that selected evidence leaves the Mac.
+
+**Reasoning**: Apple's architecture provides materially stronger technical privacy properties than a conventional hosted consumer chat service whose safeguards principally rely on provider controls, retention settings, and access policy. Those guarantees justify optional use for this threat model, but “lowest reasonably achievable risk” still requires local-first routing, data minimisation, visible provenance, and a revocable policy.
+
+**Alternative Options**: Describe PCC as risk-free (unsupported absolute claim); treat PCC identically to Claude/OpenAI (ignores material architectural guarantees and the user's approved threat model).
+
 ## Architecture
 
 ```mermaid
 flowchart TD
     subgraph UI["UI (SwiftUI)"]
         DV(Documents & Dashboard)
-        RQ(Review Queue View)
-        PA(Proposed Actions View)
-        JV(Journal View)
+        RQ(Review Queue)
+        PA(Proposed Actions)
+        ST(Settings & Processing Policy)
+        JV(Journal)
     end
 
-    subgraph Pipeline["Pipeline (actors)"]
-        SC[Inventory Scanner]
-        DD[Duplicate Detector]
-        EX[Extraction Engine]
-        CL[Classification Service]
-        SM[Summarisation Service]
-        NM[Naming Engine]
+    subgraph Local["Mac app and local frameworks"]
+        SC[Inventory / Duplicate Pipeline]
+        EX[PDFKit / Vision Extraction]
+        MR[Model Router]
+        OD[On-Device Foundation Model]
         OE[Operation Executor]
-    end
-
-    subgraph System["Apple Frameworks"]
-        FM[Foundation Models]
-        VIS[Vision OCR / PDFKit]
-    end
-
-    subgraph Store["App Container"]
         DB[(SwiftData Store)]
     end
 
+    subgraph AppleCloud["Apple Private Cloud Compute"]
+        PCC[Attested PCC Foundation Model]
+    end
+
     DV -->|start scan| SC
-    SC -->|InventoryRecords| DB
-    DD -->|dup groups + quarantine drafts| DB
-    EX -->|render/OCR request| VIS
-    VIS -->|recognized text| EX
-    EX -->|ExtractedText| DB
-    CL -->|prompt ≤2k chars| FM
-    FM -->|category + confidence| CL
-    CL -->|Recommendation| DB
-    SM -->|prompt ≤3k chars| FM
-    SM -->|summary ≤500 chars| DB
-    NM -->|ProposedActions| DB
-    RQ -->|overrides / decisions| DB
-    PA -->|approve batch| OE
-    OE -->|journal entries + moves| DB
+    SC -->|file records| DB
+    SC -->|supported files| EX
+    EX -->|text + visual evidence| DB
+    DB -->|pending semantic work| MR
+    ST -->|processing policy| MR
+    MR -->|local request by default| OD
+    MR -.->|policy-gated bounded request| PCC
+    OD -->|typed proposal + provenance| DB
+    PCC -.->|typed proposal + provenance| DB
+    RQ -->|overrides / retry choice| DB
+    PA -->|approved actions| OE
+    OE -->|journal + local moves| DB
     JV -->|rollback request| OE
 ```
 
@@ -191,9 +191,11 @@ Discovery/
     DuplicateDetector.swift
     Extraction/
       ExtractionEngine.swift
-      PDFExtractor.swift  OCRExtractor.swift  OfficeExtractor.swift
+      PDFExtractor.swift  OCRExtractor.swift  VisualEvidenceExtractor.swift  OfficeExtractor.swift
     ModelServices/
+      ProcessingPolicy.swift
       ModelAvailability.swift
+      ModelRouter.swift
       ClassificationService.swift
       SummarisationService.swift
     NamingEngine.swift
@@ -257,15 +259,36 @@ struct DuplicateDetector {
 
 // Domain/Extraction/ExtractionEngine.swift — Req 4
 actor ExtractionEngine {
-    static let insufficientThreshold = 25   // non-whitespace chars, Glossary "Insufficient Extraction"
+    static let insufficientThreshold = 25
     func extract(_ record: InventoryRecord, in root: ArchiveRoot) async -> ExtractionOutcome
 }
-enum ExtractionOutcome { case text(String, method: ExtractionMethod); case failed(reason: String); case insufficient(String) }
+struct VisualEvidence: Sendable {
+    let recognizedText: String?
+    let barcodeKinds: [String]          // payload omitted unless explicitly required
+    let imageLabels: [LabeledConfidence]
+    let imageInputs: [PreparedImage]    // bounded, ephemeral model inputs
+}
+enum ExtractionOutcome {
+    case text(String, visual: VisualEvidence, method: ExtractionMethod)
+    case visualOnly(VisualEvidence)
+    case failed(reason: String)
+}
 
-// Domain/ModelServices — Req 5, 9, 12
-// GenerableCategory constrains model output to the taxonomy + unknown at the schema level (5.1).
-// Mapping rule: .unknown → InventoryRecord.recommendedCategory = nil (routes to Review Queue per 5.4);
-// any other case → recommendedCategory = Category(rawValue:) of the same name.
+// Domain/ModelServices — Req 5, 9, 11, 12, 16
+enum ProcessingPolicy: String, Codable { case localOnly, applePrivateCloudAllowed }
+enum ModelExecutionTier: String, Codable { case onDevice, privateCloudCompute }
+struct ModelExecutionRecord: Codable, Sendable {
+    let tier: ModelExecutionTier
+    let osVersion: String
+    let promptVersion: String
+    let timestamp: Date
+    let modality: String
+}
+struct SemanticRequest: Sendable {
+    let textEvidence: String
+    let imageEvidence: [PreparedImage]
+    let purpose: ModelPurpose
+}
 @Generable enum GenerableCategory: String { case financial, medical, employment, identity, other, unknown }
 @Generable struct CategoryRecommendation {
     @Guide(description: "Best-fitting document category") var category: GenerableCategory
@@ -273,16 +296,26 @@ enum ExtractionOutcome { case text(String, method: ExtractionMethod); case faile
     @Guide(description: "Issuing organisation or subject, short") var issuer: String
     @Guide(description: "Primary document date, ISO 8601, empty if absent") var documentDate: String
 }
+@available(macOS 27.0, *)
+actor ModelRouter {
+    func respond<T: Generable>(
+        to request: SemanticRequest,
+        policy: ProcessingPolicy,
+        generating: T.Type
+    ) async throws -> (T, ModelExecutionRecord)
+}
 actor ClassificationService {
-    static let inputCap = 2_000
-    var reviewThreshold: Double   // default 0.7, settings-backed
-    func classify(text: String) async throws -> CategoryRecommendation
+    var reviewThreshold: Double
+    func classify(_ request: SemanticRequest) async throws -> (CategoryRecommendation, ModelExecutionRecord)
 }
 actor SummarisationService {
-    static let inputCap = 3_000, outputCap = 500
-    func summarise(text: String) async throws -> String   // deterministically truncated to outputCap
+    static let outputCap = 500
+    func summarise(_ request: SemanticRequest) async throws -> (String, ModelExecutionRecord)
 }
-enum ModelAvailability { static func status() -> SystemLanguageModel.Availability }
+enum ModelAvailability {
+    static func onDeviceStatus() -> SystemLanguageModel.Availability
+    @available(macOS 27.0, *) static func pccStatus() -> PCCAvailabilitySnapshot
+}
 
 // Domain/NamingEngine.swift — Req 6
 struct NamingEngine {
@@ -336,10 +369,13 @@ SwiftData `@Model` classes in `Persistence/Models.swift` (fields are the contrac
     var status: String                                      // DocumentStatus.rawValue
     var extractedText: String?                              // app container only (1.6, 11)
     var extractionMethod: String?
+    var visualEvidenceMetadata: Data?                       // no image/barcode payloads
     var recommendedCategory: String?; var confidence: Double?
     var overriddenCategory: String?                         // authoritative when set (13.2)
     var recommendedIssuer: String?; var recommendedDate: Date?
+    var classificationExecution: Data?                      // ModelExecutionRecord
     var summary: String?; var summaryPending: Bool          // Req 9
+    var summaryExecution: Data?                             // ModelExecutionRecord
     var classificationPending: Bool                         // Degraded Mode (12.4)
 }
 
@@ -415,9 +451,9 @@ For any pipeline run over fixtures, every file created/modified/moved on disk is
 For any folder tree, scanning changes no file bytes/dates under the roots; re-scanning an unchanged tree yields the same record set (by path+hash); re-scanning after a content change updates that record's hash and resets its downstream statuses to pending.
 **Validates: Requirements 2.4, 2.5, 2.6**
 
-### Property 10: No network capability
-The compiled app's entitlements contain `com.apple.security.app-sandbox = true` and no `com.apple.security.network.*` key. (Asserted by a unit test parsing `Discovery.entitlements`.)
-**Validates: Requirements 11.2, 11.3, 11.4**
+### Property 10: Processing Policy gates every cloud request
+For any semantic request under `Local Only`, no `PrivateCloudComputeLanguageModel` session is constructed or invoked. Under `Apple Private Cloud Allowed`, every cloud request uses the Apple PCC model through Foundation Models and has a matching Model Execution Record; no arbitrary provider client exists.
+**Validates: Requirements 5.2, 5.3, 5.4, 11.2, 11.3, 11.4, 16.1, 16.4**
 
 ### Property 11: Summary cap and locality
 For any stored summary: length ≤ 500 characters, stored only in the app-container store, and generated only when a category was assigned by threshold-passing recommendation or user override.
@@ -427,6 +463,14 @@ For any stored summary: length ≤ 500 characters, stored only in the app-contai
 For any dismissed NearDuplicatePair, re-running detection over unchanged files does not recreate an active pair; changing either file's bytes (new hash) makes the pair eligible again.
 **Validates: Requirement 13.3**
 
+### Property 13: Text-free documents never receive fabricated evidence
+For any image with no usable OCR text and no permitted multimodal model, the document enters Review Queue with `visualOnly` evidence and no generated category or filename proposal.
+**Validates: Requirements 4.6, 4.7, 4.8, 5.1, 13.1**
+
+### Property 14: PCC provenance is complete and content-free
+For every completed or failed PCC operation, exactly one Model Execution Record identifies the PCC tier, prompt version, modality, OS version, and timestamp while containing no prompt, text, image, path, filename, summary, or barcode payload.
+**Validates: Requirements 5.5, 9.4, 11.8, 16.4**
+
 ## Error Handling
 
 | Condition | Handling |
@@ -435,8 +479,10 @@ For any dismissed NearDuplicatePair, re-running detection over unchanged files d
 | Rename fails with a cross-device error (mount point nested inside the Archive Root) | Abort that action, journal `failed`, ReviewItem `abortedOperation`; no copy+delete fallback in v1 (Decision 10). |
 | File unreadable during scan (2.7) | Record status `unreadable`, scan continues; surfaced in Documents view filter. |
 | Extraction throws / insufficient (4.5) | Status `extractionFailed`, ReviewItem created; original file untouched. |
-| Model unavailable (12.1) | `ModelAvailability.status()` checked before every model call and on app-foreground; UI shows reason (`.deviceNotEligible`, `.appleIntelligenceNotEnabled`, `.modelNotReady`); records park as `pendingModel` with `classificationPending`/`summaryPending` set. Resume only after user confirmation (12.4). |
-| Model call throws (guardrail refusal, context overflow, transient) | One retry with truncated input (half the cap); second failure → `reviewPending` with reason `lowConfidence` payload noting model error code (code only — no content, 11.5). |
+| No Approved Apple Model available (12.1) | Check on-device and, only when policy permits, PCC availability before every call and on app foreground. Show the specific hardware/OS/model/network/entitlement/quota reason; park records as pending and resume only after confirmation. |
+| PCC unavailable or quota exhausted (12.5, 16.5) | Route to on-device when the request fits; otherwise park in Review Queue. Show persistent quota guidance supplied by the framework; never route to a third party. |
+| Model call throws (guardrail refusal, context overflow, transient) | Retry once with reduced evidence on the same tier. If policy permits and the failure is a documented routing reason, PCC may be tried after local failure; otherwise create a content-free error record and route to review. |
+| Text-free image without permitted multimodal model (4.8) | Preserve local Visual Evidence, create a ReviewItem, and do not invent a category, issuer, date, or filename. |
 | Pre/post-move hash mismatch (7.3) | Abort operation; if the file already landed at destination, move it back (journaled); mark journal `failed`; ReviewItem `abortedOperation`. |
 | Destination exists (7.4) | Abort that action only; batch continues; ReviewItem created. |
 | Crash mid-batch | Launch-time `JournalReconciler` probes `pending` entries by hash at both paths, marks `interrupted`, creates ReviewItems; no automatic repair. |
@@ -450,18 +496,29 @@ Test targets match CI: **DiscoveryTests** (unit/integration, Swift Testing) and 
 - **Text PDF**: CoreGraphics PDF context drawing synthetic statement text (fake bank name, fake account "0000-TEST").
 - **Scanned PDF**: render the same text to a bitmap, embed as image-only PDF page (no text layer).
 - **Hybrid PDF**: one real text-layer page plus one image-only page in a single document — asserts per-page OCR merging (Decision 6); a whole-document heuristic fails this fixture.
-- **Images**: PNG/JPEG/HEIC renders of synthetic payslips; near-duplicate variants re-encoded at different quality/scale (drives Property 4 and Req 3.4 fixture pairs).
+- **Images**: PNG/JPEG/HEIC renders of synthetic payslips; near-duplicate variants; a text-free ordinary photo; an image-only synthetic document whose category is visible from layout/symbols but has no usable OCR text; a fake barcode/MRZ fixture containing no real identifier.
 - **Office**: DOCX (minimal OOXML zip via ZIPFoundation), XLSX (minimal sheet + sharedStrings), RTF/TXT/CSV literals.
-- **Edge cases**: 0-byte file, 10-char text file (insufficient), unreadable file (permissions dropped), unsupported type (`.zip`).
+- **Edge cases**: 0-byte file, 10-char text file (insufficient), unreadable file (permissions dropped), unsupported type (`.zip`), PCC unavailable, PCC quota exhausted, policy changed while work is queued.
 
 Test layers:
 
-1. **Unit (pure logic)**: NamingEngine (Property 5, exhaustive charset cases), DuplicateDetector similarity math (Property 4), Insufficient Extraction threshold (Property 6), threshold routing (Property 7), summary truncation (Property 11), taxonomy decoding (Req 15).
-2. **Integration (temp-dir filesystem)**: Scanner read-only + upsert behaviour (Property 9); Executor move/abort/no-overwrite/rollback round-trips including crash simulation by killing between WAL states (Properties 1, 2, 3); write confinement via before/after directory snapshot diff (Property 8); a concurrency-race test driving multiple pipeline actors over the shared store simultaneously (validates Decision 3/4's single-writer claim rather than assuming it).
-3. **Static/config tests**: entitlements parsing (Property 10); DiagnosticsExporter output schema contains no path/text/summary keys (Req 11.5); repo-level test asserting `DiscoveryTests/Fixtures` contains no binary documents checked in (Req 14.1).
-4. **Model-dependent tests**: classification/summarisation tests are `@Test(.enabled(if: ModelAvailability.isAvailable))` — they run locally on eligible hardware and skip cleanly on CI (CI's runner cannot assume Apple Intelligence). Degraded-mode routing tests mock `ModelAvailability` to force unavailability (Req 12).
+1. **Unit (pure logic)**: NamingEngine, DuplicateDetector, extraction thresholds, visual-only routing, Model Router policy/routing matrices, dynamic context budgeting, confidence routing, summary truncation, provenance redaction, and taxonomy decoding.
+2. **Integration (temp-dir filesystem)**: Scanner read-only/upsert behaviour; executor move/abort/no-overwrite/rollback; write confinement; concurrency races; queued semantic work surviving policy and availability changes.
+3. **Static/config tests**: sandbox and folder entitlements; PCC capability absent/present build configurations; no provider SDK/API key or analytics dependency; DiagnosticsExporter schema excludes content; no binary documents checked in.
+4. **Model-dependent tests**: On-device and PCC tests run only on eligible hardware and use Synthetic Fixtures. PCC tests require macOS 27, the assigned entitlement, an available quota, and the Apple Private Cloud Allowed test policy. CI uses mocked model adapters and must never send a live PCC request.
 
-**CI contingency**: `ci.yml` runs on `macos-latest`, whose Xcode image may not yet carry the macOS 26 SDK (the workflow itself flags this). The first milestone probes `xcodebuild -showsdks` on the runner; if the SDK is absent, pin an explicit Xcode version step when one exists, otherwise treat local `xcodebuild test` on eligible hardware as the interim gate and mark CI as expected-red with a comment — never lower the deployment target to make CI pass, since Foundation Models requires macOS 26.
+**CI contingency**: `ci.yml` keeps the macOS 26.5 local-only build as the stable gate. A separate macOS 27/Xcode 27 job is allowed to be conditional while the SDK is beta or unavailable on hosted runners. Never lower the deployment target or enable live PCC requests merely to make CI pass.
 5. **UI smoke (DiscoveryUITests)**: launch, onboarding renders, add-folder panel appears, Review Queue and Journal views render with seeded store.
 
 Property-style tests use randomized inputs over generators (seeded, reported on failure) within Swift Testing parameterised tests — no external property-testing dependency.
+
+
+## External References
+
+- [Private Cloud Compute Security Guide](https://security.apple.com/documentation/private-cloud-compute/)
+- [Stateless Computation and Enforceable Guarantees](https://security.apple.com/documentation/private-cloud-compute/statelessandenforcable)
+- [Verifiable Transparency](https://security.apple.com/documentation/private-cloud-compute/verifiabletransparency)
+- [Accessing Private Cloud Compute](https://developer.apple.com/private-cloud-compute/)
+- [Build with the new Apple Foundation Model on Private Cloud Compute](https://developer.apple.com/videos/play/wwdc2026/319/)
+- [What's new in macOS 27](https://developer.apple.com/macos/whats-new/)
+- [Vision framework](https://developer.apple.com/documentation/vision)
