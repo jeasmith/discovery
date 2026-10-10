@@ -1,3 +1,20 @@
+# AGENTS.md
+
+Project instructions for every coding agent (Claude Code, Codex, Cursor).
+
+## Where to run
+
+Discovery is a native macOS app built with Xcode against Apple Intelligence and
+the Foundation Models framework. Build, run and test it **only on a Mac with
+Xcode** (a local session, not a cloud one).
+
+- **Cloud sessions** (Linux) can't build or test it. Use them only for specs and
+  docs under `.opal/`, then rely on CI (`.github/workflows/ci.yml`, a macOS
+  runner) to build and test the change.
+- **Build and test locally** with
+  `xcodebuild build -project Discovery.xcodeproj -scheme Discovery -destination 'platform=macOS'`,
+  and `xcodebuild test` with the same arguments.
+
 <!-- OPALSPEC-INSTRUCTIONS-START -->
 ﻿# Project Agent Instructions
 
